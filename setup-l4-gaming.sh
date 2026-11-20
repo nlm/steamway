@@ -45,7 +45,7 @@ export DEBIAN_FRONTEND=noninteractive
 # ---------------------------------------------------------------- base packages
 log "Enabling multiverse and 32-bit packages"
 apt-get update
-apt-get install -y software-properties-common pciutils curl jq ca-certificates
+apt-get install -y software-properties-common pciutils curl jq ca-certificates cloud-guest-utils
 lspci | grep -qi nvidia || die "no NVIDIA GPU found - is this a GPU instance?"
 add-apt-repository -y multiverse
 dpkg --add-architecture i386
@@ -403,6 +403,58 @@ else
 fi
 EOF
 chmod 0700 /usr/local/sbin/sunshine-pair
+
+# Root resize helper: after enlarging the system volume in the Scaleway console, run
+# `grow-root` to make the space usable without a reboot. (cloud-init also grows the
+# root partition at boot, so a reboot works too.)
+cat > /usr/local/sbin/grow-root <<'EOF'
+#!/usr/bin/env bash
+# Usage: grow-root [-n]   (-n: dry run, only show what would change)
+# Grows the partition holding / to the end of its disk, then the filesystem.
+set -euo pipefail
+DRY=0
+case ${1:-} in -n|--dry-run) DRY=1 ;; "") ;; *) echo "Usage: grow-root [-n]" >&2; exit 2 ;; esac
+die() { echo "grow-root: $*" >&2; exit 1; }
+(( EUID == 0 )) || die "run as root"
+
+SRC=$(findmnt -no SOURCE /)
+FSTYPE=$(findmnt -no FSTYPE /)
+PART=$(basename "$(readlink -f "$SRC")")
+[[ -f /sys/class/block/$PART/partition ]] || die "/ is on ${SRC}, not a plain disk partition (LVM?); grow it by hand"
+DISK=$(lsblk -no PKNAME "/dev/$PART")
+PARTNUM=$(cat "/sys/class/block/$PART/partition")
+size() { lsblk -bdno SIZE "/dev/$1" | numfmt --to=iec; }
+
+# The kernel only sees the new size of the volume after a rescan.
+BEFORE=$(size "$DISK")
+if [[ -w /sys/class/block/$DISK/device/rescan ]]; then
+  echo 1 > "/sys/class/block/$DISK/device/rescan"
+  udevadm settle
+fi
+echo "Disk /dev/${DISK}: ${BEFORE} -> $(size "$DISK")"
+echo "Partition /dev/${PART} (${FSTYPE} on /): $(size "$PART")"
+
+# growpart exits 1 with "NOCHANGE" when the partition already fills the disk.
+if (( DRY )); then
+  growpart --dry-run "/dev/$DISK" "$PARTNUM" || true
+  exit 0
+fi
+if OUT=$(growpart "/dev/$DISK" "$PARTNUM" 2>&1); then
+  echo "$OUT"
+elif [[ $OUT == NOCHANGE* ]]; then
+  echo "Partition already fills the disk."
+else
+  die "growpart failed: $OUT"
+fi
+
+case $FSTYPE in
+  ext2|ext3|ext4) resize2fs "/dev/$PART" ;;
+  xfs)            xfs_growfs / ;;
+  *)              die "don't know how to grow a ${FSTYPE} filesystem" ;;
+esac
+df -h /
+EOF
+chmod 0700 /usr/local/sbin/grow-root
 
 # ---------------------------------------------------------------------- firewall
 if command -v ufw >/dev/null && ufw status | grep -q 'Status: active'; then

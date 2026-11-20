@@ -126,6 +126,8 @@ ALLOW_FROM=<YOUR_HOME_IP>/32 bash setup-l4-gaming.sh
   every other dialog to the real zenity. The first start downloads about 3 GB and takes
   about 3 minutes before the login screen appears.
 - A random web UI password, saved in `/root/sunshine-webui-credentials.txt`.
+- Two root-only helper commands: `sunshine-pair` (pair a client, see step 5) and `grow-root`
+  (use the extra space after enlarging the system volume, see *Daily use*).
 
 ### 5. Pair a client
 
@@ -239,6 +241,17 @@ From now on, launch **Steam Big Picture** from Moonlight.
 
 > Stopping releases the GPU. At busy times Scaleway may have no L4 free when you
 > want to start again. You'd have to wait or try another zone.
+
+**Need more disk space?**
+1. In the Scaleway console, open the instance's system volume (**Block Storage**) and
+   click **Resize**. You can only make it bigger, and the instance can keep running.
+2. On the server, run:
+   ```bash
+   ssh root@<SERVER_IP> grow-root
+   ```
+   It makes the kernel see the new size, grows the root partition to the end of the
+   volume, then grows the filesystem. No reboot needed. Run `grow-root -n` first to
+   see what it would do. (A reboot also works: the image grows the root partition at boot.)
 
 > **Check how the IP is set up.** If the public IP is *dynamic*, it can change after
 > a stop/start, and you'd have to re-add the PC in Moonlight. Reserve a **flexible IP**
