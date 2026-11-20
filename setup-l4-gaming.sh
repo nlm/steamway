@@ -13,6 +13,7 @@
 #   RESOLUTION   virtual display size                        (default: 1920x1080)
 #   REFRESH      virtual display refresh rate, Hz            (default: 60)
 #   ALLOW_FROM   IP/CIDR allowed to stream, applied to ufw    (default: any)
+#   SUNSHINE_VERSION  exact Sunshine release to install, pinned (default: 2026.1119.204022)
 #
 # Safe to re-run. If no NVIDIA driver is present, it installs one and asks you to
 # reboot and run the script again.
@@ -22,6 +23,12 @@ GAMER_USER="${GAMER_USER:-gamer}"
 RESOLUTION="${RESOLUTION:-1920x1080}"
 REFRESH="${REFRESH:-60}"
 ALLOW_FROM="${ALLOW_FROM:-}"
+# Sunshine is pinned to an exact, tested version; there is deliberately no "latest".
+# Bump it by hand after testing a new release. The current pin is a pre-release: the
+# stable v2026.914 lacks libvirtualhid's fix for virtual Switch Pro pads going idle,
+# which makes Steam drop and re-add the controller in a loop
+# (LizardByte/libvirtualhid#176, fixed by #180).
+SUNSHINE_VERSION="${SUNSHINE_VERSION:-2026.1119.204022}"
 
 log()  { printf '\n\033[1;32m==> %s\033[0m\n' "$*"; }
 warn() { printf '\033[1;33mWARN: %s\033[0m\n' "$*" >&2; }
@@ -84,17 +91,31 @@ if systemctl is-active --quiet display-manager 2>/dev/null; then
 fi
 
 # ---------------------------------------------------------------------- Sunshine
-if ! command -v sunshine >/dev/null; then
-  log "Installing Sunshine (latest release)"
-  # Release assets are named like sunshine_<ver>-1+ubuntu24.04_amd64.deb
+[[ $SUNSHINE_VERSION =~ ^[0-9]+(\.[0-9]+)+$ ]] \
+  || die "SUNSHINE_VERSION must be an exact release number like 2026.1119.204022, got '${SUNSHINE_VERSION}'"
+# dpkg already records the installed version (e.g. 2026.1119.204022-1+ubuntu24.04);
+# GitHub is only contacted when it differs from the pin, so re-runs work offline.
+HAVE_VER=""
+installed sunshine && HAVE_VER=$(dpkg-query -W -f='${Version}' sunshine)
+if [[ ${HAVE_VER%%-*} == "$SUNSHINE_VERSION" ]]; then
+  log "Sunshine ${SUNSHINE_VERSION} already installed"
+else
+  log "Installing Sunshine ${SUNSHINE_VERSION} (currently: ${HAVE_VER:-none})"
+  RELEASE_API="https://api.github.com/repos/LizardByte/Sunshine/releases/tags/v${SUNSHINE_VERSION}"
+  RELEASE_JSON=$(curl -fsSL "$RELEASE_API") \
+    || die "cannot fetch Sunshine release v${SUNSHINE_VERSION} from GitHub (wrong version, release deleted, rate limit or no network)"
+  # Assets are named like sunshine_<ver>-1+ubuntu24.04_amd64.deb. Use the asset
+  # *name*: browser_download_url percent-encodes the '+' (%2B).
   SUFFIX="+ubuntu${VERSION_ID}_amd64.deb"
-  URL=$(curl -fsSL https://api.github.com/repos/LizardByte/Sunshine/releases/latest \
-        | jq -r --arg s "$SUFFIX" '[.assets[] | select(.name | endswith($s))][0].browser_download_url // empty')
-  [[ -n $URL ]] || die "the latest Sunshine release has no *${SUFFIX} package. Use an Ubuntu 24.04 GPU image."
-  ASSET=${URL##*/}
+  ASSET="" URL=""
+  read -r ASSET URL < <(jq -r --arg s "$SUFFIX" \
+    '([.assets[] | select(.name | endswith($s))][0] // empty) | "\(.name) \(.browser_download_url)"' \
+    <<<"$RELEASE_JSON") || true
+  [[ -n $ASSET ]] || die "Sunshine release v${SUNSHINE_VERSION} has no *${SUFFIX} package. Use an Ubuntu 24.04 GPU image."
   DL_DIR=$(mktemp -d)
   curl -fsSL -o "$DL_DIR/$ASSET" "$URL"
-  apt-get install -y "$DL_DIR/$ASSET"
+  # --allow-downgrades: the pin wins, even over a newer Sunshine installed by hand.
+  apt-get install -y --allow-downgrades "$DL_DIR/$ASSET"
   rm -rf "$DL_DIR"
 fi
 
@@ -105,17 +126,52 @@ usermod -aG video,render,input,audio "$GAMER_USER"
 loginctl enable-linger "$GAMER_USER"   # user services start at boot, no login needed
 GAMER_HOME=$(getent passwd "$GAMER_USER" | cut -d: -f6)
 GAMER_UID=$(id -u "$GAMER_USER")
+# Files below are created by the gamer itself (see as_gamer), so it must own its home.
+[[ -d $GAMER_HOME && ! -L $GAMER_HOME && $(stat -c %U "$GAMER_HOME") == "$GAMER_USER" ]] \
+  || die "home ${GAMER_HOME} of '${GAMER_USER}' must be a directory owned by ${GAMER_USER}"
+if [[ -e $GAMER_HOME/.config && $(stat -c %U "$GAMER_HOME/.config") != "$GAMER_USER" ]]; then
+  die "${GAMER_HOME}/.config is not owned by ${GAMER_USER}. Check it, then: chown -R ${GAMER_USER}: ${GAMER_HOME}/.config"
+fi
 
-# Sunshine injects keyboard/mouse/gamepad input through uinput. The packaged udev
-# rule relies on a logged-in seat, which a headless box never has, so grant the
-# 'input' group instead.
-echo uinput > /etc/modules-load.d/uinput.conf
+# Everything under the gamer's home is written AS the gamer. Steam and games run as
+# that user, so it is untrusted: writing there as root would follow any symlink it
+# planted (e.g. desktop.service -> /etc/sudoers.d/x) and overwrite system files.
+as_gamer()       { runuser -u "$GAMER_USER" -- env HOME="$GAMER_HOME" "$@"; }
+write_as_gamer() { as_gamer tee "$1" >/dev/null; }
+
+# Sunshine injects keyboard/mouse through uinput, and creates Switch Pro / DualSense
+# virtual gamepads through uhid (otherwise every pad falls back to Xbox and buttons
+# from a Switch Pro client get scrambled). Cloud kernels ship uhid and hid-nintendo
+# in linux-modules-extra. The packaged udev rules rely on a logged-in seat, which a
+# headless box never has, so grant the 'input' group instead. (Sunshine's own
+# 60-sunshine.rules already gives 'input' the virtual pads' /dev/hidraw*, so Steam
+# can drive them natively.)
+# Scaleway's image installs the kernel through the linux-virtual meta-package, which
+# leaves linux-modules-extra out. Install the extras for the running kernel now, and
+# the linux-image-generic meta-package (same -generic kernel, plus its extras) so
+# every future kernel update brings them too. The NVIDIA driver is DKMS-built, so it
+# follows kernel updates on its own.
+KVER=$(uname -r)
+if [[ $KVER == *-generic ]]; then
+  apt-get install -y --no-install-recommends linux-image-generic "linux-modules-extra-${KVER}" \
+    || warn "could not install linux-modules-extra; virtual Switch/PlayStation pads will fall back to Xbox"
+elif ! modprobe -n uhid 2>/dev/null; then
+  apt-get install -y "linux-modules-extra-${KVER}" \
+    || warn "no linux-modules-extra for kernel ${KVER}; virtual Switch/PlayStation pads will fall back to Xbox"
+fi
 modprobe uinput
+modprobe uhid || true
+printf 'uinput\nuhid\n' > /etc/modules-load.d/uinput.conf
 cat > /etc/udev/rules.d/85-sunshine-uinput.rules <<'EOF'
 KERNEL=="uinput", SUBSYSTEM=="misc", GROUP="input", MODE="0660", OPTIONS+="static_node=uinput"
+KERNEL=="uhid", SUBSYSTEM=="misc", GROUP="input", MODE="0660", OPTIONS+="static_node=uhid"
 EOF
+rm -f /etc/udev/rules.d/99-sunshine-no-hidraw.rules   # workaround from an older version of this script
 udevadm control --reload-rules
-chgrp input /dev/uinput && chmod 0660 /dev/uinput
+for dev in /dev/uinput /dev/uhid; do
+  if [[ -e $dev ]]; then chgrp input "$dev"; chmod 0660 "$dev"; fi
+done
+[[ -e /dev/uhid ]] || warn "/dev/uhid is missing: virtual Switch/PlayStation pads will fall back to Xbox"
 
 # ------------------------------------------------------- Xorg on a virtual display
 log "Configuring a ${RESOLUTION}@${REFRESH} virtual display"
@@ -189,11 +245,11 @@ EOF
 # ------------------------------------------------------------ user-level services
 log "Creating Openbox, Steam and Sunshine services for ${GAMER_USER}"
 UNIT_DIR="$GAMER_HOME/.config/systemd/user"
-mkdir -p "$UNIT_DIR/default.target.wants"
+as_gamer mkdir -p "$UNIT_DIR/default.target.wants"
 WAIT_X="ExecStartPre=/bin/sh -c 'until xset q >/dev/null 2>&1; do sleep 1; done'"
 STEAM_BIN=$(command -v steam || echo /usr/games/steam)
 
-cat > "$UNIT_DIR/desktop.service" <<EOF
+write_as_gamer "$UNIT_DIR/desktop.service" <<EOF
 [Unit]
 Description=Openbox window manager on :0
 
@@ -209,7 +265,7 @@ RestartSec=2
 WantedBy=default.target
 EOF
 
-cat > "$UNIT_DIR/sunshine-headless.service" <<EOF
+write_as_gamer "$UNIT_DIR/sunshine-headless.service" <<EOF
 [Unit]
 Description=Sunshine game stream host
 Wants=desktop.service pipewire-pulse.service
@@ -238,7 +294,7 @@ exec /usr/bin/zenity "$@"
 EOF
 chmod 0755 "$SHIM_DIR/zenity"
 
-cat > "$UNIT_DIR/steam.service" <<EOF
+write_as_gamer "$UNIT_DIR/steam.service" <<EOF
 [Unit]
 Description=Steam (Big Picture)
 Wants=desktop.service pipewire-pulse.service
@@ -260,14 +316,21 @@ WantedBy=default.target
 EOF
 
 for u in desktop sunshine-headless steam; do
-  ln -sf "../$u.service" "$UNIT_DIR/default.target.wants/$u.service"
+  as_gamer ln -sfn "../$u.service" "$UNIT_DIR/default.target.wants/$u.service"
 done
+
+# Openbox: open Steam games (Proton windows have class steam_app_<id>) full-screen
+# without a title bar. Otherwise a windowed game gets a 16 px frame, and the bottom
+# of its image is pushed off the streamed screen.
+as_gamer mkdir -p "$GAMER_HOME/.config/openbox"
+sed 's|</applications>|  <application class="steam_app_*">\n    <decor>no</decor>\n    <fullscreen>yes</fullscreen>\n  </application>\n</applications>|' \
+  /etc/xdg/openbox/rc.xml | write_as_gamer "$GAMER_HOME/.config/openbox/rc.xml"
 
 # ------------------------------------------------------------- Sunshine settings
 SUN_DIR="$GAMER_HOME/.config/sunshine"
-mkdir -p "$SUN_DIR"
+as_gamer mkdir -p "$SUN_DIR"
 if [[ ! -f $SUN_DIR/sunshine.conf ]]; then
-  cat > "$SUN_DIR/sunshine.conf" <<'EOF'
+  write_as_gamer "$SUN_DIR/sunshine.conf" <<'EOF'
 # Generated by setup-l4-gaming.sh
 capture = x11
 encoder = nvenc
@@ -275,7 +338,6 @@ encoder = nvenc
 origin_web_ui_allowed = lan
 EOF
 fi
-chown -R "$GAMER_USER:" "$GAMER_HOME/.config"
 
 PASS_FILE=/root/sunshine-webui-credentials.txt
 if [[ ! -f $PASS_FILE ]]; then

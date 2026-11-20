@@ -98,6 +98,7 @@ ALLOW_FROM=<YOUR_HOME_IP>/32 bash setup-l4-gaming.sh
 | `RESOLUTION` | `1920x1080` | Virtual display size, e.g. `2560x1440` |
 | `REFRESH` | `60` | Refresh rate in Hz |
 | `ALLOW_FROM` | any | Source IP/CIDR for the ufw rules (only used if ufw is active) |
+| `SUNSHINE_VERSION` | `2026.1119.204022` | Exact Sunshine release to install. It is pinned on purpose (there is no `latest`); bump it after testing a new release. The script only downloads from GitHub when the installed version differs from the pin, and then installs exactly the pin, even if that means a downgrade. The default is a pre-release: the stable v2026.914 has a bug that makes Steam drop and reconnect virtual Switch Pro controllers every few seconds ([libvirtualhid #176](https://github.com/LizardByte/libvirtualhid/issues/176)). |
 
 ### 4. What the script sets up
 
@@ -108,7 +109,16 @@ ALLOW_FROM=<YOUR_HOME_IP>/32 bash setup-l4-gaming.sh
   - `desktop.service`: the Openbox window manager
   - `steam.service`: Steam in Big Picture mode
   - `sunshine-headless.service`: the Sunshine stream host
-- Access to `uinput` for the `input` group, so keyboard, mouse and gamepad input from Moonlight works.
+- Input from Moonlight:
+  - The Xorg input driver (`xserver-xorg-input-libinput`), so Xorg uses Sunshine's virtual keyboard and mouse.
+  - Access to `/dev/uinput` (keyboard, mouse, Xbox pads) and `/dev/uhid` (Switch Pro and PlayStation pads)
+    for the `input` group, since a headless server has no logged-in seat.
+  - `linux-modules-extra` for the running kernel, plus the `linux-image-generic` meta-package so kernel
+    updates keep bringing it (Scaleway's image uses `linux-virtual`, which leaves it out). It provides
+    `uhid`; without it, every controller is emulated as an Xbox pad. This also installs the pending
+    kernel update and ~500 MB of firmware packages, unused on a VM but harmless.
+- An Openbox rule (`~gamer/.config/openbox/rc.xml`) that opens Steam games full-screen without a title
+  bar. Otherwise a windowed game gets a frame, and the bottom of its image is pushed off the stream.
 - Sunshine set to X11 capture with the NVENC encoder. Its web UI only accepts connections from localhost or the LAN.
 - A small `zenity` stand-in in `/usr/local/lib/steamway/`, used only by the Steam service.
   Ubuntu's `steam-installer` asks "Install Steam?" in a dialog on its first run; the
@@ -151,7 +161,14 @@ From now on, launch **Steam Big Picture** from Moonlight.
 
 1. **Install** *Moonlight Game Streaming* from the Play Store on the TV.
 2. **Pair a gamepad** with the TV: *Settings → Remotes & Accessories → Add accessory*.
-   Xbox, PlayStation and most Bluetooth gamepads work.
+   Use an **Xbox or PlayStation** controller. Android TV handles those correctly.
+   > **Nintendo Switch Pro controllers can map wrongly on Android TV.** On some
+   > boxes (tested: Freebox Player Pop, over USB and Bluetooth), the buttons
+   > arrive mixed up and the D-pad doesn't arrive at all. The cause is the box's
+   > Android firmware, not the server or the controller: it's a known, open Moonlight
+   > Android issue ([#842](https://github.com/moonlight-stream/moonlight-android/issues/842)).
+   > The same controller works on a Mac. Also, Android TV keeps the controller's
+   > **Home** button for itself, so pressing it leaves Moonlight.
 3. Open Moonlight. The server is on the internet, not your LAN, so it won't appear
    automatically. Choose **Add PC manually** (the **+** icon) and enter `<SERVER_IP>`.
 4. Select the PC. Moonlight shows a PIN. Enter it in the Sunshine web UI (Part 1, step 5),
@@ -180,6 +197,10 @@ From now on, launch **Steam Big Picture** from Moonlight.
 3. Use the **Settings** from the TV table above. Optionally:
    - **Windowed mode** if you want other windows visible next to the stream.
    - **Capture system keyboard shortcuts** (fullscreen only) so Alt+Tab etc. go to the game.
+   - **Nintendo Switch Pro controller:** connect it to the Mac (Bluetooth or USB) *before*
+     starting the stream. If A/B and X/Y are swapped, turn on **"Swap A/B and X/Y gamepad
+     buttons"**. Change only that setting, not Steam's "Use Nintendo button layout" as well,
+     or the two cancel out.
 4. Useful shortcuts:
 
    | Shortcut | Action |
@@ -225,7 +246,10 @@ From now on, launch **Steam Big Picture** from Moonlight.
 | Xorg fails with "no screens found" | Check that `nvidia-smi` works and that the BusID in `/etc/X11/xorg-headless.conf` matches `nvidia-smi --query-gpu=pci.bus_id --format=csv` |
 | No sound | Is PipeWire running for the gamer user? `sudo -u gamer XDG_RUNTIME_DIR=/run/user/$(id -u gamer) pactl info` |
 | Mouse doesn't move and keyboard does nothing | `grep "No input driver" /var/log/Xorg.0.log`. If Sunshine's `libvirtualhid` devices are listed as ignored, install `xserver-xorg-input-libinput` (the script does this) and run `systemctl restart xorg-headless` |
-| Gamepad or keyboard doesn't respond | `ls -l /dev/uinput` should show group `input` and mode `crw-rw----`. Is gamer in `input`? `id gamer` |
+| Gamepad or keyboard doesn't respond | `ls -l /dev/uinput /dev/uhid` should show group `input` and mode `crw-rw----`. Is gamer in `input`? `id gamer` |
+| A Switch Pro or PlayStation controller shows up as an Xbox pad, with buttons mixed up | `journalctl _SYSTEMD_USER_UNIT=sunshine-headless.service \| grep uhid`. If it says *failed to open /dev/uhid*, the `uhid` module is missing for the running kernel: `apt install linux-modules-extra-$(uname -r)` or re-run the script |
+| Steam shows "controller connected / disconnected" every few seconds | Sunshine older than the version pinned by `SUNSHINE_VERSION` (`dpkg -l sunshine`). Steam's `logs/controller.txt` shows `hid_read failure`. Re-run the script to upgrade |
+| A game has a title bar, or its bottom edge is cut off | The game is windowed and Openbox frames it. Check that `~gamer/.config/openbox/rc.xml` has the `steam_app_*` rule (the script adds it), then restart the game, or set it to full-screen in its own options |
 | Stutter or blocky video | Lower the bitrate in Moonlight, use wired Ethernet, and check the stats overlay. High *network* latency means the region is too far; high *decode* latency means the TV box is too slow (try H.264) |
 | Steam closed and won't come back | `sudo -u gamer XDG_RUNTIME_DIR=/run/user/$(id -u gamer) systemctl --user restart steam` |
 | A game won't start | Check its ProtonDB rating. Games with kernel anti-cheat often block virtual machines |
