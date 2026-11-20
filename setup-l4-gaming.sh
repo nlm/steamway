@@ -348,6 +348,62 @@ if [[ ! -f $PASS_FILE ]]; then
   printf 'user: admin\npassword: %s\n' "$PASS" > "$PASS_FILE"
 fi
 
+# Pairing helper: sends the PIN Moonlight shows to Sunshine's API, so pairing is one
+# command (`ssh root@<ip> sunshine-pair 1234 tv`) instead of a tunnel + browser.
+cat > /usr/local/sbin/sunshine-pair <<'EOF'
+#!/usr/bin/env bash
+# Usage: sunshine-pair <PIN> [device name]   (default name: the one Moonlight sends)
+# If several devices are waiting, choose with PAIRING_ID=<id> (the script lists them).
+set -euo pipefail
+CREDS=/root/sunshine-webui-credentials.txt
+PORT=${SUNSHINE_WEB_PORT:-47990}
+[[ ${1:-} =~ ^[0-9]{4}$ ]] || { echo "Usage: sunshine-pair <4-digit PIN> [device name]" >&2; exit 2; }
+PIN=$1
+USER_=$(awk '/^user:/{print $2}' "$CREDS")
+PASS=$(awk '/^password:/{print $2}' "$CREDS")
+# Credentials go through stdin (curl -K -), not argv, so they don't show up in ps.
+api() {
+  printf 'user = "%s:%s"\n' "$USER_" "$PASS" | curl -sS -k --max-time 10 -K - \
+    -H 'Content-Type: application/json' -H "Origin: https://localhost:${PORT}" \
+    "$@" "https://localhost:${PORT}/api/pin" \
+    || { echo "Could not reach Sunshine on port ${PORT}. Is it running?" >&2; exit 1; }
+}
+# The PIN answers one pending pairing request (what Moonlight opened when it showed
+# the PIN). List them: {"pairings":[{"id","name","address"}]}.
+PENDING=$(api)
+# Name and address come from the remote client: strip control characters so they
+# can't inject terminal escape sequences when printed.
+PENDING=$(jq -c '.pairings |= map(map_values(if type == "string" then gsub("[[:cntrl:]]"; "?") else . end))' <<<"$PENDING")
+COUNT=$(jq '.pairings | length' <<<"$PENDING")
+if (( COUNT == 0 )); then
+  echo "No pending pairing request. Select the PC in Moonlight so it shows a PIN, then retry." >&2
+  exit 1
+elif [[ -n ${PAIRING_ID:-} ]]; then
+  REQ=$(jq -c --arg id "$PAIRING_ID" '.pairings[] | select(.id == $id)' <<<"$PENDING")
+  [[ -n $REQ ]] || { echo "No pending request with id ${PAIRING_ID}." >&2; exit 1; }
+elif (( COUNT == 1 )); then
+  REQ=$(jq -c '.pairings[0]' <<<"$PENDING")
+else
+  echo "Several devices are waiting to pair. Pick one with PAIRING_ID=<id> sunshine-pair ${PIN}:" >&2
+  jq -r '.pairings[] | "  \(.id)  \(.name // "?")  \(.address // "?")"' <<<"$PENDING" >&2
+  exit 1
+fi
+ID=$(jq -r '.id' <<<"$REQ")
+NAME=${2:-$(jq -r '.name // empty' <<<"$REQ")}
+NAME=${NAME:-moonlight-$(date +%Y%m%d-%H%M%S)}
+echo "Pairing $(jq -r '"\(.name // "unknown device") (\(.address // "unknown address"))"' <<<"$REQ") as '${NAME}'..."
+BODY=$(jq -cn --arg id "$ID" --arg pin "$PIN" --arg name "$NAME" '{pairing_id: $id, pin: $pin, name: $name}')
+RESP=$(api -d "$BODY")
+if jq -e '.status == true or .status == "true"' >/dev/null 2>&1 <<<"$RESP"; then
+  echo "Paired '${NAME}'."
+else
+  echo "Pairing failed: $(tr -d '\000-\010\013-\037\177' <<<"${RESP:-empty response}")" >&2
+  echo "Check that Moonlight is still showing this PIN, then retry." >&2
+  exit 1
+fi
+EOF
+chmod 0700 /usr/local/sbin/sunshine-pair
+
 # ---------------------------------------------------------------------- firewall
 if command -v ufw >/dev/null && ufw status | grep -q 'Status: active'; then
   log "Opening Moonlight ports in ufw (from ${ALLOW_FROM:-any})"
@@ -376,6 +432,9 @@ cat <<EOF
     Do NOT open 47990 (web UI).
 
  2. Pair Moonlight:
+      - In Moonlight (TV or laptop): add PC manually -> ${PUBLIC_IP}
+      - Then, from your laptop:  ssh root@${PUBLIC_IP} sunshine-pair <PIN> <device-name>
+    Or, through the web UI:
       - On your laptop:  ssh -L 47990:localhost:47990 root@${PUBLIC_IP}
       - Open https://localhost:47990 (accept the self-signed cert)
         login: see ${PASS_FILE}

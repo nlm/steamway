@@ -131,6 +131,16 @@ ALLOW_FROM=<YOUR_HOME_IP>/32 bash setup-l4-gaming.sh
 
 Each client device (TV, laptop) is paired **once**, using a PIN.
 
+**Quick way:** on the client, start Moonlight and add the server (see Part 2). Moonlight
+shows a **4-digit PIN**. While the PIN is on screen, run this from your laptop:
+```bash
+ssh root@<SERVER_IP> sunshine-pair 1234 living-room-tv
+```
+The device name is optional (default: the name Moonlight sends). The `sunshine-pair` command (installed by the script) sends the PIN to
+Sunshine's API on the server, so you don't need a tunnel or a browser.
+
+**Through the web UI** (if you'd rather use the browser):
+
 1. Open an SSH tunnel from your laptop, and leave it open:
    ```bash
    ssh -L 47990:localhost:47990 root@<SERVER_IP>
@@ -171,8 +181,8 @@ From now on, launch **Steam Big Picture** from Moonlight.
    > **Home** button for itself, so pressing it leaves Moonlight.
 3. Open Moonlight. The server is on the internet, not your LAN, so it won't appear
    automatically. Choose **Add PC manually** (the **+** icon) and enter `<SERVER_IP>`.
-4. Select the PC. Moonlight shows a PIN. Enter it in the Sunshine web UI (Part 1, step 5),
-   using your laptop with the SSH tunnel.
+4. Select the PC. Moonlight shows a PIN. While it is on screen, pair from your laptop with
+   `ssh root@<SERVER_IP> sunshine-pair <PIN> tv` (or use the web UI, Part 1, step 5).
 5. Open Moonlight's **Settings** before the first session:
 
    | Setting | Recommended |
