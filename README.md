@@ -119,6 +119,7 @@ ALLOW_FROM=<YOUR_HOME_IP>/32 bash setup-l4-gaming.sh
     kernel update and ~500 MB of firmware packages, unused on a VM but harmless.
 - An Openbox rule (`~gamer/.config/openbox/rc.xml`) that opens Steam games full-screen without a title
   bar. Otherwise a windowed game gets a frame, and the bottom of its image is pushed off the stream.
+  It also turns off `keepBorder`, so borderless games don't get a 1 px line on the top and left edges.
 - Sunshine set to X11 capture with the NVENC encoder. Its web UI only accepts connections from localhost or the LAN.
 - A small `zenity` stand-in in `/usr/local/lib/steamway/`, used only by the Steam service.
   Ubuntu's `steam-installer` asks "Install Steam?" in a dialog on its first run; the

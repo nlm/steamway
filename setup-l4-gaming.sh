@@ -321,9 +321,11 @@ done
 
 # Openbox: open Steam games (Proton windows have class steam_app_<id>) full-screen
 # without a title bar. Otherwise a windowed game gets a 16 px frame, and the bottom
-# of its image is pushed off the streamed screen.
+# of its image is pushed off the streamed screen. keepBorder=no: undecorated windows
+# would otherwise keep a 1 px border (a white line on the top and left edges).
 as_gamer mkdir -p "$GAMER_HOME/.config/openbox"
-sed 's|</applications>|  <application class="steam_app_*">\n    <decor>no</decor>\n    <fullscreen>yes</fullscreen>\n  </application>\n</applications>|' \
+sed -e 's|<keepBorder>yes</keepBorder>|<keepBorder>no</keepBorder>|' \
+    -e 's|</applications>|  <application class="steam_app_*">\n    <decor>no</decor>\n    <fullscreen>yes</fullscreen>\n  </application>\n</applications>|' \
   /etc/xdg/openbox/rc.xml | write_as_gamer "$GAMER_HOME/.config/openbox/rc.xml"
 
 # ------------------------------------------------------------- Sunshine settings
