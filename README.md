@@ -18,15 +18,6 @@ Play your Steam library on an Android TV or a laptop. The games run on a Scalewa
 `setup-l4-gaming.sh` sets up the server side in one run. Once it has run, the
 instance boots straight into a streamable Steam session and nobody needs to log in.
 
-> **Tested** on 2026-11-19: an `L4-1-24G` in `pl-waw-2` with the *Ubuntu Noble GPU OS 13
-> (Nvidia)* image (driver 580.178.04, `-server` packages). On that instance:
-> - OpenGL and Vulkan both rendered on the L4.
-> - Sunshine found the H.264, HEVC and AV1 NVENC encoders and created its virtual keyboard and mice.
-> - Steam set itself up and opened Big Picture without anyone clicking anything.
-> - A screen capture plus HEVC NVENC encode at 1080p sustained 60 fps.
->
-> Not tested yet: an actual Moonlight stream, pairing, audio during a stream, and a game.
-
 ---
 
 ## What you need
@@ -96,7 +87,7 @@ ALLOW_FROM=<YOUR_HOME_IP>/32 bash setup-l4-gaming.sh
 |---|---|---|
 | `GAMER_USER` | `gamer` | Linux account that runs Steam and Sunshine |
 | `RESOLUTION` | `1920x1080` | Virtual display size, e.g. `2560x1440` |
-| `REFRESH` | `60` | Refresh rate in Hz |
+| `REFRESH` | `120` | Refresh rate in Hz. Moonlight still picks 60 or 120 fps per client, so 120 also suits 60 Hz screens. Games without a frame cap may render up to 120 fps and use more GPU. Re-running the script on an older server switches it to 120 Hz; pass `REFRESH=60` to keep 60 |
 | `ALLOW_FROM` | any | Source IP/CIDR for the ufw rules (only used if ufw is active) |
 | `SUNSHINE_VERSION` | `2026.1119.204022` | Exact Sunshine release to install. It is pinned on purpose (there is no `latest`); bump it after testing a new release. The script only downloads from GitHub when the installed version differs from the pin, and then installs exactly the pin, even if that means a downgrade. The default is a pre-release: the stable v2026.914 has a bug that makes Steam drop and reconnect virtual Switch Pro controllers every few seconds ([libvirtualhid #176](https://github.com/LizardByte/libvirtualhid/issues/176)). |
 
@@ -120,7 +111,11 @@ ALLOW_FROM=<YOUR_HOME_IP>/32 bash setup-l4-gaming.sh
 - An Openbox rule (`~gamer/.config/openbox/rc.xml`) that opens Steam games full-screen without a title
   bar. Otherwise a windowed game gets a frame, and the bottom of its image is pushed off the stream.
   It also turns off `keepBorder`, so borderless games don't get a 1 px line on the top and left edges.
-- Sunshine set to X11 capture with the NVENC encoder. Its web UI only accepts connections from localhost or the LAN.
+- Sunshine set to NvFBC capture with the NVENC encoder. NvFBC copies each frame straight into GPU
+  memory, which uses about half the CPU and GPU of X11 capture. Its web UI only accepts connections
+  from localhost or the LAN.
+- `/etc/security/limits.d/90-gamer-nice.conf`, which lets Sunshine run its capture and send threads
+  at a higher priority than the game, so a busy game doesn't delay the stream.
 - A small `zenity` stand-in in `/usr/local/lib/steamway/`, used only by the Steam service.
   Ubuntu's `steam-installer` asks "Install Steam?" in a dialog on its first run; the
   stand-in answers yes to that one question so Steam installs unattended, and passes
@@ -186,15 +181,19 @@ From now on, launch **Steam Big Picture** from Moonlight.
    automatically. Choose **Add PC manually** (the **+** icon) and enter `<SERVER_IP>`.
 4. Select the PC. Moonlight shows a PIN. While it is on screen, pair from your laptop with
    `ssh root@<SERVER_IP> sunshine-pair <PIN> tv` (or use the web UI, Part 1, step 5).
-5. Open Moonlight's **Settings** before the first session:
+5. Open Moonlight's **Settings** before the first session. **Set FPS to the refresh rate of the
+   screen you play on**: 60 on a 60 Hz TV, 120 on a 120 Hz screen. A stream faster than the
+   screen doesn't help, it only queues and drops frames.
 
    | Setting | Recommended |
    |---|---|
-   | Resolution / FPS | 1080p / 60 FPS (match the server's `RESOLUTION`/`REFRESH`) |
+   | Resolution / FPS | 1080p / 60 FPS (120 FPS only if the TV runs at 120 Hz) |
    | Video bitrate | 20–30 Mbps (lower it if you see stutter) |
    | Video codec | HEVC (try AV1 if the device supports it) |
    | Frame pacing | *Balanced* |
    | Optimize game settings | Off |
+
+   Put the TV in its **Game** mode. Otherwise its image processing can add 30–100 ms.
 
 6. Choose **Steam Big Picture** and play. To leave a game, press **Back + Start + LB + RB**
    on the gamepad (Start + Select + L1 + R1), then choose *Quit session* on the PC tile.
@@ -207,8 +206,16 @@ From now on, launch **Steam Big Picture** from Moonlight.
    flatpak install flathub com.moonlight_stream.Moonlight
    ```
 2. **Add the server:** click **+** → `<SERVER_IP>` → pair with the PIN, as above.
-3. Use the **Settings** from the TV table above. Optionally:
-   - **Windowed mode** if you want other windows visible next to the stream.
+3. Use the **Settings** from the TV table above, with these changes for the lowest latency:
+   - **FPS:** 120 on a 120 Hz screen (for example a MacBook Pro's ProMotion screen), otherwise 60.
+   - **V-Sync:** off, and **Frame pacing:** off. Both hold frames back to line them up with the
+     screen. You may see a little tearing instead.
+   - **Full-screen.** Windowed mode works if you want other windows visible, but it may add
+     latency.
+   - **Bitrate:** at 120 fps, Moonlight's suggested default is about 1.4× higher (21 Mbps instead
+     of 15 at 1080p). Keeping the lower bitrate also works, with slightly softer fast motion.
+
+   Optionally:
    - **Capture system keyboard shortcuts** (fullscreen only) so Alt+Tab etc. go to the game.
    - **Nintendo Switch Pro controller:** connect it to the Mac (Bluetooth or USB) *before*
      starting the stream. If A/B and X/Y are swapped, turn on **"Swap A/B and X/Y gamepad
@@ -222,6 +229,9 @@ From now on, launch **Steam Big Picture** from Moonlight.
    | `Ctrl+Alt+Shift+X` | Toggle fullscreen |
    | `Ctrl+Alt+Shift+Z` | Release/capture the mouse |
    | `Ctrl+Alt+Shift+S` | Show performance stats (latency, dropped frames) |
+
+   With NvFBC capture the stats have no "Host processing latency" line. That's expected:
+   Sunshine doesn't timestamp NvFBC frames, so it has nothing to report.
 
 ---
 
@@ -274,6 +284,9 @@ From now on, launch **Steam Big Picture** from Moonlight.
 | A Switch Pro or PlayStation controller shows up as an Xbox pad, with buttons mixed up | `journalctl _SYSTEMD_USER_UNIT=sunshine-headless.service \| grep uhid`. If it says *failed to open /dev/uhid*, the `uhid` module is missing for the running kernel: `apt install linux-modules-extra-$(uname -r)` or re-run the script |
 | Steam shows "controller connected / disconnected" every few seconds | Sunshine older than the version pinned by `SUNSHINE_VERSION` (`dpkg -l sunshine`). Steam's `logs/controller.txt` shows `hid_read failure`. Re-run the script to upgrade |
 | A game has a title bar, or its bottom edge is cut off | The game is windowed and Openbox frames it. Check that `~gamer/.config/openbox/rc.xml` has the `steam_app_*` rule (the script adds it), then restart the game, or set it to full-screen in its own options |
+| Moonlight shows error 503, "Failed to initialize video capture/encoding. Is a display connected and turned on?" | NvFBC capture failed. Check `~gamer/.config/sunshine/sunshine.log` for `Unable to initialize capture method`. Sunshine doesn't fall back to X11 by itself: set `capture = x11` in `~gamer/.config/sunshine/sunshine.conf`, then `sudo -u gamer XDG_RUNTIME_DIR=/run/user/$(id -u gamer) systemctl --user restart sunshine-headless` |
+| A server installed before NvFBC became the default still uses X11 capture | Re-running the script never changes an existing `sunshine.conf`. Set `capture = nvfbc` in `~gamer/.config/sunshine/sunshine.conf` and restart Sunshine (command above) |
+| The stats show a rendering rate below the stream's FPS and a frame queue delay of several ms | The screen is slower than the stream (e.g. a 120 fps stream on a 60 Hz TV). Lower Moonlight's FPS to the screen's refresh rate |
 | Stutter or blocky video | Lower the bitrate in Moonlight, use wired Ethernet, and check the stats overlay. High *network* latency means the region is too far; high *decode* latency means the TV box is too slow (try H.264) |
 | Steam closed and won't come back | `sudo -u gamer XDG_RUNTIME_DIR=/run/user/$(id -u gamer) systemctl --user restart steam` |
 | A game won't start | Check its ProtonDB rating. Games with kernel anti-cheat often block virtual machines |
